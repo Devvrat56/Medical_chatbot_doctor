@@ -1,4 +1,4 @@
-import streamlit as st
+import Medical_chatbot_doctor.chatbot as st
 from groq import Groq
 from context import init_conversation
 from core.ocr_engine import extract_text_from_file

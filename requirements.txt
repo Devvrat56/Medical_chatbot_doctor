@@ -1,0 +1,6 @@
+streamlit
+groq
+pymongo
+python-dotenv
+motor
+easyocr
