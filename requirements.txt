@@ -1,8 +1,6 @@
 streamlit
 groq
-pymongo
 python-dotenv
-motor
 easyocr
 pymupdf
 fpdf2

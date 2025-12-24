@@ -12,7 +12,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fpdf import FPDF
 
-from database.local_db import (
+from local_db import (
     init_db,
     create_session,
     save_message
