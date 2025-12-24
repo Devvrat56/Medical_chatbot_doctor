@@ -13,7 +13,6 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # Chat sessions table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS chat_sessions (
         session_id TEXT PRIMARY KEY,
@@ -23,7 +22,6 @@ def init_db():
     )
     """)
 
-    # Chat messages table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS chat_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,13 +36,15 @@ def init_db():
     conn.close()
 
 
-def create_session(session_id, user_type):
-    now = datetime.utcnow().isoformat()
+def ensure_session_exists(session_id, user_type="unknown"):
     conn = get_conn()
     cur = conn.cursor()
 
+    now = datetime.utcnow().isoformat()
+
+    # 🔐 SAFE: creates session if missing
     cur.execute("""
-    INSERT INTO chat_sessions
+    INSERT OR IGNORE INTO chat_sessions
     (session_id, user_type, created_at, last_active)
     VALUES (?, ?, ?, ?)
     """, (session_id, user_type, now, now))
@@ -67,7 +67,14 @@ def update_session_activity(session_id):
     conn.close()
 
 
+def create_session(session_id, user_type):
+    ensure_session_exists(session_id, user_type)
+
+
 def save_message(session_id, role, content):
+    # 🛡️ GUARANTEE session row exists
+    ensure_session_exists(session_id)
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -77,8 +84,7 @@ def save_message(session_id, role, content):
     VALUES (?, ?, ?, ?)
     """, (session_id, role, content, datetime.utcnow().isoformat()))
 
-    # Update session timestamp
-    update_session_activity(session_id)
-
     conn.commit()
     conn.close()
+
+    update_session_activity(session_id)
