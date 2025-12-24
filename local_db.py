@@ -5,14 +5,15 @@ from datetime import datetime
 DB_PATH = "onco_chatbot.db"
 
 
-def get_connection():
+def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
 def init_db():
-    conn = get_connection()
+    conn = get_conn()
     cur = conn.cursor()
 
+    # Chat sessions table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS chat_sessions (
         session_id TEXT PRIMARY KEY,
@@ -22,6 +23,7 @@ def init_db():
     )
     """)
 
+    # Chat messages table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS chat_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,12 +38,9 @@ def init_db():
     conn.close()
 
 
-# ---------------------------
-# SESSION FUNCTIONS
-# ---------------------------
 def create_session(session_id, user_type):
     now = datetime.utcnow().isoformat()
-    conn = get_connection()
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -55,7 +54,7 @@ def create_session(session_id, user_type):
 
 
 def update_session_activity(session_id):
-    conn = get_connection()
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -68,11 +67,8 @@ def update_session_activity(session_id):
     conn.close()
 
 
-# ---------------------------
-# MESSAGE FUNCTIONS
-# ---------------------------
 def save_message(session_id, role, content):
-    conn = get_connection()
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -81,24 +77,8 @@ def save_message(session_id, role, content):
     VALUES (?, ?, ?, ?)
     """, (session_id, role, content, datetime.utcnow().isoformat()))
 
+    # Update session timestamp
     update_session_activity(session_id)
+
     conn.commit()
     conn.close()
-
-
-def get_conversation(session_id, limit=50):
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-    SELECT role, content
-    FROM chat_messages
-    WHERE session_id = ?
-    ORDER BY id ASC
-    LIMIT ?
-    """, (session_id, limit))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return [{"role": r, "content": c} for r, c in rows]
