@@ -1,5 +1,5 @@
 from datetime import datetime
-from database import chat_messages, chat_sessions
+from Medical_chatbot_doctor.database.local_db import chat_messages, chat_sessions
 
 async def save_message(session_id: str, role: str, message: str):
     chat_data = {
