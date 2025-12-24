@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from Medical_chatbot_doctor.database.local_db import chat_sessions
+from database import chat_sessions
 
 async def create_session(user_id: str):
     session_id = str(uuid.uuid4())
