@@ -19,10 +19,11 @@ from local_db import (
     save_message
 )
 
-# 🎤 MIC + AUDIO
+# 🎤 MIC + AUDIO (only mic_recorder needed now)
 from streamlit_mic_recorder import mic_recorder
-from pydub import AudioSegment
-import speech_recognition as sr
+
+# Groq Whisper client (OpenAI-compatible)
+from openai import OpenAI
 
 # ----------------------------------
 # INITIAL SETUP
@@ -41,6 +42,12 @@ DOCTOR_ID = "dev_doc24"
 
 llm_client = Groq(api_key=GROQ_API_KEY)
 pdf_router = PDFReferenceRouter(pdf_folder="pdfs")
+
+# Groq Whisper client
+whisper_client = OpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
 
 # ----------------------------------
 # LANGUAGE CONFIG
@@ -121,30 +128,29 @@ Text:
     return response.choices[0].message.content
 
 # ----------------------------------
-# 🎤 SPEECH → TEXT (FFMPEG PIPELINE)
+# SPEECH → TEXT using Groq Whisper
 # ----------------------------------
 def transcribe_audio_bytes(audio_bytes):
-    recognizer = sr.Recognizer()
-
-    # Decode browser audio (WebM/Opus) using FFmpeg
-    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-
-    # Convert to SpeechRecognition-compatible format
-    audio = audio.set_frame_rate(16000).set_channels(1)
-
-    wav_io = io.BytesIO()
-    audio.export(wav_io, format="wav")
-    wav_io.seek(0)
-
-    with sr.AudioFile(wav_io) as source:
-        audio_data = recognizer.record(source)
-
     try:
-        return recognizer.recognize_google(audio_data)
-    except sr.UnknownValueError:
-        return "Sorry, I could not understand the audio."
-    except sr.RequestError:
-        return "Speech recognition service unavailable."
+        # Prepare file-like object (Whisper needs filename hint)
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "recording.webm"  # Browser mic usually gives webm/opus
+
+        # Map app language to Whisper language code
+        lang_map = {"en": "en", "hi": "hi", "pa": "pa", "de": "de", "sv": "sv"}
+        lang_code = lang_map.get(st.session_state.lang, "en")
+
+        transcription = whisper_client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=audio_file,
+            response_format="text",
+            language=lang_code
+        )
+        return transcription.strip()
+
+    except Exception as e:
+        st.error(f"Voice transcription failed: {str(e)}")
+        return "Sorry, could not understand the audio. Please try typing instead."
 
 # ----------------------------------
 # CHATBOT CORE
@@ -220,10 +226,24 @@ Conversation:
 def export_pdf(summary, doctor, reg_id):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=11)
+    pdf.set_font("Helvetica", size=11)  # Changed to Helvetica (more reliable)
 
+    # Better handling of long lines
     for line in summary.split("\n"):
-        pdf.multi_cell(0, 8, line)
+        if len(line) > 100:
+            # Simple word wrap for very long lines
+            words = line.split()
+            current = ""
+            for word in words:
+                if len(current) + len(word) + 1 > 90:
+                    pdf.multi_cell(0, 8, current)
+                    current = word
+                else:
+                    current = (current + " " + word) if current else word
+            if current:
+                pdf.multi_cell(0, 8, current)
+        else:
+            pdf.multi_cell(0, 8, line)
 
     pdf.ln(5)
     pdf.cell(0, 8, f"Doctor: {doctor}", ln=True)
@@ -277,7 +297,7 @@ with right:
     )
 
     if audio:
-        with st.spinner("Transcribing..."):
+        with st.spinner("Transcribing with Groq Whisper..."):
             spoken_text = transcribe_audio_bytes(audio["bytes"])
             st.success(f"🗣 You said: {spoken_text}")
             st.session_state.ui_history.append(("You (Voice)", spoken_text))
@@ -308,14 +328,17 @@ with right:
         reg_id = st.text_input("Registration ID")
 
         if st.button("Export PDF"):
-            pdf_path = export_pdf(
-                st.session_state.summary,
-                doctor,
-                reg_id
-            )
-            with open(pdf_path, "rb") as f:
-                st.download_button(
-                    "Download PDF",
-                    f,
-                    file_name="clinical_summary.pdf"
+            if not doctor.strip():
+                st.warning("Please enter Doctor Name before exporting")
+            else:
+                pdf_path = export_pdf(
+                    st.session_state.summary,
+                    doctor,
+                    reg_id
                 )
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download PDF",
+                        f,
+                        file_name="clinical_summary.pdf"
+                    )

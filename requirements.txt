@@ -20,3 +20,8 @@ fpdf2>=2.8.5          # ← modern replacement, more reliable than fpdf
 # Optional but very useful for stability
 pillow>=10.0.0        # needed by many audio/image libs
 numpy>=1.26.0         # often pulled by others anyway
+
+python-dotenv
+fpdf2                # better to use fpdf2 instead of fpdf
+openai               # for whisper client
+streamlit-mic-recorder
