@@ -11,6 +11,7 @@ import tempfile
 from datetime import datetime
 from dotenv import load_dotenv
 from fpdf import FPDF
+import io
 
 from local_db import (
     init_db,
@@ -18,8 +19,13 @@ from local_db import (
     save_message
 )
 
+# 🎤 MIC + AUDIO
+from streamlit_mic_recorder import mic_recorder
+from pydub import AudioSegment
+import speech_recognition as sr
+
 # ----------------------------------
-# CONFIG
+# INITIAL SETUP
 # ----------------------------------
 load_dotenv()
 init_db()
@@ -37,12 +43,29 @@ llm_client = Groq(api_key=GROQ_API_KEY)
 pdf_router = PDFReferenceRouter(pdf_folder="pdfs")
 
 # ----------------------------------
+# LANGUAGE CONFIG
+# ----------------------------------
+LANGUAGES = {
+    "English": "en",
+    "Hindi": "hi",
+    "Punjabi": "pa",
+    "German": "de",
+    "Swedish": "sv"
+}
+
+if "lang" not in st.session_state:
+    st.session_state.lang = "en"
+
+# ----------------------------------
 # SESSION INIT
 # ----------------------------------
 if "user_type" not in st.session_state:
 
     st.title("💉 Oncology Assistant Chatbot")
     st.subheader("Access Mode")
+
+    selected_lang = st.selectbox("🌐 Output Language", LANGUAGES.keys())
+    st.session_state.lang = LANGUAGES[selected_lang]
 
     doc_id = st.text_input("Enter Doctor ID (optional)", type="password")
 
@@ -71,10 +94,64 @@ if "user_type" not in st.session_state:
     st.stop()
 
 # ----------------------------------
-# BOT FUNCTION
+# TRANSLATION
+# ----------------------------------
+def translate_text(text, target_lang):
+    if target_lang == "en":
+        return text
+
+    prompt = f"""
+Translate the following medical content accurately.
+Do NOT add or remove information.
+Preserve medical terminology.
+
+Target language: {target_lang}
+
+Text:
+{text}
+"""
+
+    response = llm_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=900
+    )
+
+    return response.choices[0].message.content
+
+# ----------------------------------
+# 🎤 SPEECH → TEXT (FFMPEG PIPELINE)
+# ----------------------------------
+def transcribe_audio_bytes(audio_bytes):
+    recognizer = sr.Recognizer()
+
+    # Decode browser audio (WebM/Opus) using FFmpeg
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+
+    # Convert to SpeechRecognition-compatible format
+    audio = audio.set_frame_rate(16000).set_channels(1)
+
+    wav_io = io.BytesIO()
+    audio.export(wav_io, format="wav")
+    wav_io.seek(0)
+
+    with sr.AudioFile(wav_io) as source:
+        audio_data = recognizer.record(source)
+
+    try:
+        return recognizer.recognize_google(audio_data)
+    except sr.UnknownValueError:
+        return "Sorry, I could not understand the audio."
+    except sr.RequestError:
+        return "Speech recognition service unavailable."
+
+# ----------------------------------
+# CHATBOT CORE
 # ----------------------------------
 def ask_bot(user_input):
     save_message(st.session_state.session_id, "user", user_input)
+
     st.session_state.llm_history.append(
         {"role": "user", "content": user_input}
     )
@@ -86,14 +163,16 @@ def ask_bot(user_input):
         max_tokens=700
     )
 
-    reply = response.choices[0].message.content
+    raw_reply = response.choices[0].message.content
+    reply = translate_text(raw_reply, st.session_state.lang)
 
-    save_message(st.session_state.session_id, "assistant", reply)
+    save_message(st.session_state.session_id, "assistant", raw_reply)
+
     st.session_state.llm_history.append(
-        {"role": "assistant", "content": reply}
+        {"role": "assistant", "content": raw_reply}
     )
-    st.session_state.ui_history.append(("Bot", reply))
 
+    st.session_state.ui_history.append(("Bot", reply))
 
 # ----------------------------------
 # CLINICAL SUMMARY
@@ -105,12 +184,10 @@ def get_patient_text():
         if msg["role"] == "user"
     )
 
-
 def generate_case_summary(text):
     prompt = f"""
-Generate a DOCTOR-READY clinical summary.
+Generate a DOCTOR-READY oncology clinical summary.
 
-Format:
 Patient Summary:
 - Age:
 - Gender:
@@ -129,12 +206,17 @@ Conversation:
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
-        max_tokens=300
+        max_tokens=350
     )
 
-    return response.choices[0].message.content
+    return translate_text(
+        response.choices[0].message.content,
+        st.session_state.lang
+    )
 
-
+# ----------------------------------
+# PDF EXPORT
+# ----------------------------------
 def export_pdf(summary, doctor, reg_id):
     pdf = FPDF()
     pdf.add_page()
@@ -152,15 +234,19 @@ def export_pdf(summary, doctor, reg_id):
     pdf.output(path)
     return path
 
-
 # ----------------------------------
 # UI
 # ----------------------------------
 st.title("💬 Oncology Assistant")
 st.caption(f"Mode: {st.session_state.user_type.upper()}")
 
+st.session_state.lang = LANGUAGES[
+    st.selectbox("🌐 Output Language", LANGUAGES.keys())
+]
+
 left, right = st.columns([1, 2])
 
+# LEFT PANEL
 with left:
     st.subheader("📄 Upload Medical Report")
 
@@ -171,16 +257,32 @@ with left:
         with open(path, "wb") as f:
             f.write(file.read())
 
-        text = extract_text_from_file(path)
-        st.text_area("Extracted Text", text, height=200)
+        extracted_text = extract_text_from_file(path)
+        st.text_area("Extracted Text", extracted_text, height=200)
 
         if st.button("Analyze Report"):
-            ask_bot(f"Analyze this safely:\n{text}")
+            ask_bot(f"Analyze this safely:\n{extracted_text}")
 
+# RIGHT PANEL
 with right:
     st.subheader("💬 Chat")
 
     msg = st.text_input("Ask a question")
+
+    st.markdown("🎤 **Or speak your question**")
+    audio = mic_recorder(
+        start_prompt="🎙 Start Recording",
+        stop_prompt="⏹ Stop Recording",
+        just_once=True
+    )
+
+    if audio:
+        with st.spinner("Transcribing..."):
+            spoken_text = transcribe_audio_bytes(audio["bytes"])
+            st.success(f"🗣 You said: {spoken_text}")
+            st.session_state.ui_history.append(("You (Voice)", spoken_text))
+            ask_bot(spoken_text)
+
     if st.button("Send") and msg.strip():
         st.session_state.ui_history.append(("You", msg))
         ask_bot(msg)
