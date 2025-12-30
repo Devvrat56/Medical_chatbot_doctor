@@ -8,19 +8,15 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import io
 
-# Your custom modules — change paths according to your project structure
+# Your custom modules
 from context import init_conversation as PATIENT_CONTEXT_FUNC
 from context_2 import init_conversation as DOCTOR_CONTEXT_FUNC
 from core.ocr_engine import extract_text_from_file
-from local_db import (
-    init_db,
-    create_session,
-    save_message
-)
+from local_db import init_db, create_session, save_message
 from streamlit_mic_recorder import mic_recorder
 
 # ────────────────────────────────────────────────────────────────
-# CONFIG & INITIAL SETUP
+# CONFIG
 # ────────────────────────────────────────────────────────────────
 
 load_dotenv()
@@ -33,11 +29,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-DOCTOR_ID = "dev_doc24"  # ← change in production!
+DOCTOR_ID = "dev_doc24"
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    st.error("GROQ_API_KEY not found in .env file")
+    st.error("GROQ_API_KEY not found in .env")
     st.stop()
 
 llm_client = Groq(api_key=GROQ_API_KEY)
@@ -55,8 +51,12 @@ LANGUAGES = {
     "Svenska": "sv"
 }
 
+# Fake hospital contact details (for demo/safety)
+FAKE_EMERGENCY_NUMBER = "+91-214-352-354-235"
+FAKE_APPOINTMENT_EMAIL = "dvvratshuk@softsensor.ai"
+
 # ────────────────────────────────────────────────────────────────
-# SESSION STATE DEFAULTS
+# SESSION STATE
 # ────────────────────────────────────────────────────────────────
 
 defaults = {
@@ -75,16 +75,33 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # ────────────────────────────────────────────────────────────────
-# VERY IMPORTANT: define ask_bot function EARLY
+# EARLY DEFINITION - ask_bot function
 # ────────────────────────────────────────────────────────────────
 
 def ask_bot(user_message: str):
-    """
-    Send user message to LLM, get response and append to history
-    """
-    # Quick safety guardrail
-    dangerous_keywords = ["dose", "dosage", "how much", "treatment plan", "cure", "prescribe"]
-    if any(kw in user_message.lower() for kw in dangerous_keywords):
+    # ── Special handling for appointment / emergency / contact requests ──
+    contact_keywords = [
+        "appointment", "book", "schedule", "make appointment",
+        "contact", "call", "phone", "number", "email", "emergency",
+        "urgent", "hospital contact", "doctor contact", "help line"
+    ]
+
+    if any(kw in user_message.lower() for kw in contact_keywords):
+        reply = (
+            "I understand you would like to book an appointment or contact the hospital — "
+            "that's a really important step.\n\n"
+            "I cannot make bookings or calls directly, but you can reach out here:\n\n"
+            f"• **Emergency / Urgent help**: Call {FAKE_EMERGENCY_NUMBER}\n"
+            f"• **Appointments & general inquiries**: Email {FAKE_APPOINTMENT_EMAIL}\n\n"
+            "The team will assist you quickly. Would you like help preparing what to tell them?"
+        )
+        st.session_state.ui_history.append(("Assistant", reply))
+        save_message(st.session_state.session_id, "assistant", reply)
+        return
+
+    # ── Normal dangerous medical questions guardrail ──
+    dangerous = ["dose", "dosage", "how much", "treatment plan", "cure", "prescribe"]
+    if any(w in user_message.lower() for w in dangerous):
         reply = (
             "I'm not allowed to give dosages, drug names "
             "or specific treatment recommendations.\n\n"
@@ -94,7 +111,7 @@ def ask_bot(user_message: str):
         save_message(st.session_state.session_id, "assistant", reply)
         return
 
-    # Save user message
+    # Normal flow
     save_message(st.session_state.session_id, "user", user_message)
     st.session_state.llm_history.append({"role": "user", "content": user_message})
 
@@ -106,7 +123,6 @@ def ask_bot(user_message: str):
             max_tokens=320,
             top_p=0.9
         )
-
         answer = response.choices[0].message.content.strip()
 
         save_message(st.session_state.session_id, "assistant", answer)
@@ -114,11 +130,10 @@ def ask_bot(user_message: str):
         st.session_state.ui_history.append(("Assistant", answer))
 
     except Exception as e:
-        st.error(f"Error contacting AI service: {str(e)}")
-
+        st.error(f"AI service error: {str(e)}")
 
 # ────────────────────────────────────────────────────────────────
-# LOGIN / MODE SELECTION SCREEN
+# LOGIN SCREEN
 # ────────────────────────────────────────────────────────────────
 
 if st.session_state.user_type is None:
@@ -130,74 +145,62 @@ if st.session_state.user_type is None:
 
     st.divider()
 
-    st.subheader("🧬 Cancer Situation (helps us answer better)")
+    st.subheader("About your situation (helps us give better answers)")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        cancer_type = st.text_input(
-            "Type of Cancer",
-            placeholder="Breast cancer, Lung cancer, CML...",
-        ).strip()
-
-    with col2:
-        cancer_stage = st.selectbox(
-            "Stage",
-            ["Unknown", "Stage 0", "Stage I", "Stage II",
-             "Stage III", "Stage IV", "Recurrent", "Not applicable"]
-        )
+    c1, c2 = st.columns(2)
+    with c1:
+        cancer_type = st.text_input("Type of Cancer", placeholder="e.g. Breast, Lung, Leukemia...").strip()
+    with c2:
+        cancer_stage = st.selectbox("Stage", [
+            "Unknown", "Stage 0", "Stage I", "Stage II",
+            "Stage III", "Stage IV", "Recurrent", "Not applicable"
+        ])
 
     st.markdown("---")
     doc_id = st.text_input("Doctor ID (leave empty if patient/family)", type="password")
 
-    if st.button("Start Conversation", type="primary", use_container_width=True):
+    if st.button("Start Conversation", type="primary"):
         is_doctor = doc_id.strip() == DOCTOR_ID
 
-        st.session_state.cancer_type = cancer_type if cancer_type else "Not specified"
+        st.session_state.cancer_type = cancer_type or "Not specified"
         st.session_state.cancer_stage = cancer_stage
         st.session_state.user_type = "doctor" if is_doctor else "patient"
 
-        base_context = DOCTOR_CONTEXT_FUNC() if is_doctor else PATIENT_CONTEXT_FUNC()
+        base = DOCTOR_CONTEXT_FUNC() if is_doctor else PATIENT_CONTEXT_FUNC()
 
-        context_add = f"""
-<IMPORTANT_CONTEXT>
+        extra_context = f"""
+<IMPORTANT>
 Cancer type: {st.session_state.cancer_type}
 Stage: {st.session_state.cancer_stage}
-
 Always relate answers to this context.
-Keep responses short, warm, supportive, non-alarming.
-</IMPORTANT_CONTEXT>
+Keep responses short, warm, supportive.
+</IMPORTANT>
 """
 
-        st.session_state.system_prompt = base_context + "\n\n" + context_add
+        st.session_state.system_prompt = base + "\n\n" + extra_context
 
-        session_id = str(uuid.uuid4())
-        create_session(session_id, st.session_state.user_type)
+        sid = str(uuid.uuid4())
+        create_session(sid, st.session_state.user_type)
 
-        st.session_state.session_id = session_id
-        st.session_state.llm_history = [
-            {"role": "system", "content": st.session_state.system_prompt}
-        ]
+        st.session_state.session_id = sid
+        st.session_state.llm_history = [{"role": "system", "content": st.session_state.system_prompt}]
         st.session_state.ui_history = []
 
-        st.success("Session started!")
+        st.success("Ready!")
         st.rerun()
 
     st.stop()
 
 # ────────────────────────────────────────────────────────────────
-# MAIN INTERFACE
+# MAIN UI
 # ────────────────────────────────────────────────────────────────
 
 st.title("🩺 Oncology Assistant")
-st.caption(
-    f"**{st.session_state.cancer_type}**  •  "
-    f"**{st.session_state.cancer_stage}**  •  "
-    f"{st.session_state.user_type.title()} mode"
-)
+st.caption(f"{st.session_state.cancer_type} • {st.session_state.cancer_stage} • {st.session_state.user_type.title()} mode")
 
 left, right = st.columns([1, 2.3])
 
-# ── LEFT: Upload Medical Report ──
+# ── LEFT: Upload ──
 with left:
     st.subheader("📋 Upload Medical Report")
     file = st.file_uploader("PDF or Image", type=["pdf", "png", "jpg", "jpeg"])
@@ -213,7 +216,7 @@ with left:
 
             if st.button("Explain this report"):
                 st.session_state.ui_history.append(("You", "[Report analysis request]"))
-                ask_bot(f"Please explain this report in simple terms:\n\n{text}")
+                ask_bot(f"Please explain this report in simple, patient-friendly language:\n\n{text}")
         finally:
             try:
                 os.unlink(path)
@@ -224,7 +227,6 @@ with left:
 with right:
     st.subheader("💬 Conversation")
 
-    # Scrollable messages container
     chat_container = st.container(height=520)
 
     with chat_container:
@@ -234,18 +236,18 @@ with right:
             else:
                 st.markdown(f"**Assistant:** {msg}")
 
-    # Auto-scroll attempt (works in many cases)
+    # Simple auto-scroll attempt
     st.markdown(
         """
         <script>
-        var elem = window.parent.document.querySelector('.stApp > div');
-        if (elem) elem.scrollTop = elem.scrollHeight;
+        const container = window.parent.document.querySelector('.stApp > div');
+        if (container) container.scrollTop = container.scrollHeight;
         </script>
         """,
         unsafe_allow_html=True
     )
 
-    # Input area — always at bottom
+    # Input at bottom
     col_text, col_send = st.columns([6, 1])
     with col_text:
         user_input = st.text_input(
@@ -254,19 +256,18 @@ with right:
             label_visibility="collapsed",
             key="chat_input"
         )
-
     with col_send:
         if st.button("Send", use_container_width=True) and user_input.strip():
             st.session_state.ui_history.append(("You", user_input))
             ask_bot(user_input)
             st.rerun()
 
-    # Voice input (optional)
+    # Voice input
     st.markdown("**Voice input**")
     audio = mic_recorder(
         format="webm",
         start_prompt="🎤 Record",
-        stop_prompt="⏹",
+        stop_prompt="⏹ Stop",
         just_once=True
     )
 
@@ -286,6 +287,5 @@ with right:
                 st.session_state.ui_history.append(("You (voice)", transcription))
                 ask_bot(transcription)
                 st.rerun()
-
             except Exception as e:
-                st.error(f"Voice → text failed: {str(e)}")
+                st.error(f"Voice recognition failed: {str(e)}")
