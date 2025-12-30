@@ -1,91 +1,174 @@
 import streamlit as st
 from groq import Groq
-from context import init_conversation as PATIENT_CONTEXT
-from context_2 import init_conversation as DOCTOR_CONTEXT
-from core.ocr_engine import extract_text_from_file
-from pdf_reference_router import PDFReferenceRouter
-
 import os
 import uuid
 import tempfile
 from datetime import datetime
 from dotenv import load_dotenv
-from fpdf import FPDF
+from openai import OpenAI
 import io
 
+# Your custom modules — change paths according to your project structure
+from context import init_conversation as PATIENT_CONTEXT_FUNC
+from context_2 import init_conversation as DOCTOR_CONTEXT_FUNC
+from core.ocr_engine import extract_text_from_file
 from local_db import (
     init_db,
     create_session,
     save_message
 )
-
-# 🎤 MIC + AUDIO (only mic_recorder needed now)
 from streamlit_mic_recorder import mic_recorder
 
-# Groq Whisper client (OpenAI-compatible)
-from openai import OpenAI
+# ────────────────────────────────────────────────────────────────
+# CONFIG & INITIAL SETUP
+# ────────────────────────────────────────────────────────────────
 
-# ----------------------------------
-# INITIAL SETUP
-# ----------------------------------
 load_dotenv()
 init_db()
 
 st.set_page_config(
-    page_title="Oncology Assistant Chatbot",
-    page_icon="💉",
-    layout="wide"
+    page_title="Oncology Assistant",
+    page_icon="🩺",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+DOCTOR_ID = "dev_doc24"  # ← change in production!
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DOCTOR_ID = "dev_doc24"
+if not GROQ_API_KEY:
+    st.error("GROQ_API_KEY not found in .env file")
+    st.stop()
 
 llm_client = Groq(api_key=GROQ_API_KEY)
-pdf_router = PDFReferenceRouter(pdf_folder="pdfs")
 
-# Groq Whisper client
 whisper_client = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1"
 )
 
-# ----------------------------------
-# LANGUAGE CONFIG
-# ----------------------------------
 LANGUAGES = {
     "English": "en",
-    "Hindi": "hi",
-    "Punjabi": "pa",
-    "German": "de",
-    "Swedish": "sv"
+    "हिन्दी": "hi",
+    "ਪੰਜਾਬੀ": "pa",
+    "Deutsch": "de",
+    "Svenska": "sv"
 }
 
-if "lang" not in st.session_state:
-    st.session_state.lang = "en"
+# ────────────────────────────────────────────────────────────────
+# SESSION STATE DEFAULTS
+# ────────────────────────────────────────────────────────────────
 
-# ----------------------------------
-# SESSION INIT
-# ----------------------------------
-if "user_type" not in st.session_state:
+defaults = {
+    "user_type": None,
+    "cancer_type": "Not specified",
+    "cancer_stage": "Unknown",
+    "lang": "en",
+    "session_id": None,
+    "llm_history": [],
+    "ui_history": [],
+    "system_prompt": "",
+}
 
-    st.title("💉 Oncology Assistant Chatbot")
-    st.subheader("Access Mode")
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-    selected_lang = st.selectbox("🌐 Output Language", LANGUAGES.keys())
+# ────────────────────────────────────────────────────────────────
+# VERY IMPORTANT: define ask_bot function EARLY
+# ────────────────────────────────────────────────────────────────
+
+def ask_bot(user_message: str):
+    """
+    Send user message to LLM, get response and append to history
+    """
+    # Quick safety guardrail
+    dangerous_keywords = ["dose", "dosage", "how much", "treatment plan", "cure", "prescribe"]
+    if any(kw in user_message.lower() for kw in dangerous_keywords):
+        reply = (
+            "I'm not allowed to give dosages, drug names "
+            "or specific treatment recommendations.\n\n"
+            "Please discuss this with your oncologist."
+        )
+        st.session_state.ui_history.append(("Assistant", reply))
+        save_message(st.session_state.session_id, "assistant", reply)
+        return
+
+    # Save user message
+    save_message(st.session_state.session_id, "user", user_message)
+    st.session_state.llm_history.append({"role": "user", "content": user_message})
+
+    try:
+        response = llm_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=st.session_state.llm_history,
+            temperature=0.45,
+            max_tokens=320,
+            top_p=0.9
+        )
+
+        answer = response.choices[0].message.content.strip()
+
+        save_message(st.session_state.session_id, "assistant", answer)
+        st.session_state.llm_history.append({"role": "assistant", "content": answer})
+        st.session_state.ui_history.append(("Assistant", answer))
+
+    except Exception as e:
+        st.error(f"Error contacting AI service: {str(e)}")
+
+
+# ────────────────────────────────────────────────────────────────
+# LOGIN / MODE SELECTION SCREEN
+# ────────────────────────────────────────────────────────────────
+
+if st.session_state.user_type is None:
+    st.title("🩺 Oncology Assistant")
+    st.markdown("### Supportive information for people affected by cancer")
+
+    selected_lang = st.selectbox("Language", list(LANGUAGES.keys()), index=0)
     st.session_state.lang = LANGUAGES[selected_lang]
 
-    doc_id = st.text_input("Enter Doctor ID (optional)", type="password")
+    st.divider()
 
-    if st.button("Continue"):
+    st.subheader("🧬 Cancer Situation (helps us answer better)")
 
-        if doc_id == DOCTOR_ID:
-            st.session_state.user_type = "doctor"
-            st.session_state.system_prompt = DOCTOR_CONTEXT
-            st.success("Doctor mode activated")
-        else:
-            st.session_state.user_type = "patient"
-            st.session_state.system_prompt = PATIENT_CONTEXT
-            st.info("Patient mode activated")
+    col1, col2 = st.columns(2)
+    with col1:
+        cancer_type = st.text_input(
+            "Type of Cancer",
+            placeholder="Breast cancer, Lung cancer, CML...",
+        ).strip()
+
+    with col2:
+        cancer_stage = st.selectbox(
+            "Stage",
+            ["Unknown", "Stage 0", "Stage I", "Stage II",
+             "Stage III", "Stage IV", "Recurrent", "Not applicable"]
+        )
+
+    st.markdown("---")
+    doc_id = st.text_input("Doctor ID (leave empty if patient/family)", type="password")
+
+    if st.button("Start Conversation", type="primary", use_container_width=True):
+        is_doctor = doc_id.strip() == DOCTOR_ID
+
+        st.session_state.cancer_type = cancer_type if cancer_type else "Not specified"
+        st.session_state.cancer_stage = cancer_stage
+        st.session_state.user_type = "doctor" if is_doctor else "patient"
+
+        base_context = DOCTOR_CONTEXT_FUNC() if is_doctor else PATIENT_CONTEXT_FUNC()
+
+        context_add = f"""
+<IMPORTANT_CONTEXT>
+Cancer type: {st.session_state.cancer_type}
+Stage: {st.session_state.cancer_stage}
+
+Always relate answers to this context.
+Keep responses short, warm, supportive, non-alarming.
+</IMPORTANT_CONTEXT>
+"""
+
+        st.session_state.system_prompt = base_context + "\n\n" + context_add
 
         session_id = str(uuid.uuid4())
         create_session(session_id, st.session_state.user_type)
@@ -96,249 +179,113 @@ if "user_type" not in st.session_state:
         ]
         st.session_state.ui_history = []
 
+        st.success("Session started!")
         st.rerun()
 
     st.stop()
 
-# ----------------------------------
-# TRANSLATION
-# ----------------------------------
-def translate_text(text, target_lang):
-    if target_lang == "en":
-        return text
+# ────────────────────────────────────────────────────────────────
+# MAIN INTERFACE
+# ────────────────────────────────────────────────────────────────
 
-    prompt = f"""
-Translate the following medical content accurately.
-Do NOT add or remove information.
-Preserve medical terminology.
+st.title("🩺 Oncology Assistant")
+st.caption(
+    f"**{st.session_state.cancer_type}**  •  "
+    f"**{st.session_state.cancer_stage}**  •  "
+    f"{st.session_state.user_type.title()} mode"
+)
 
-Target language: {target_lang}
+left, right = st.columns([1, 2.3])
 
-Text:
-{text}
-"""
-
-    response = llm_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=900
-    )
-
-    return response.choices[0].message.content
-
-# ----------------------------------
-# SPEECH → TEXT using Groq Whisper
-# ----------------------------------
-def transcribe_audio_bytes(audio_bytes):
-    try:
-        # Prepare file-like object (Whisper needs filename hint)
-        audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "recording.webm"  # Browser mic usually gives webm/opus
-
-        # Map app language to Whisper language code
-        lang_map = {"en": "en", "hi": "hi", "pa": "pa", "de": "de", "sv": "sv"}
-        lang_code = lang_map.get(st.session_state.lang, "en")
-
-        transcription = whisper_client.audio.transcriptions.create(
-            model="whisper-large-v3",
-            file=audio_file,
-            response_format="text",
-            language=lang_code
-        )
-        return transcription.strip()
-
-    except Exception as e:
-        st.error(f"Voice transcription failed: {str(e)}")
-        return "Sorry, could not understand the audio. Please try typing instead."
-
-# ----------------------------------
-# CHATBOT CORE
-# ----------------------------------
-def ask_bot(user_input):
-    save_message(st.session_state.session_id, "user", user_input)
-
-    st.session_state.llm_history.append(
-        {"role": "user", "content": user_input}
-    )
-
-    response = llm_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=st.session_state.llm_history,
-        temperature=0.1 if st.session_state.user_type == "doctor" else 0.3,
-        max_tokens=700
-    )
-
-    raw_reply = response.choices[0].message.content
-    reply = translate_text(raw_reply, st.session_state.lang)
-
-    save_message(st.session_state.session_id, "assistant", raw_reply)
-
-    st.session_state.llm_history.append(
-        {"role": "assistant", "content": raw_reply}
-    )
-
-    st.session_state.ui_history.append(("Bot", reply))
-
-# ----------------------------------
-# CLINICAL SUMMARY
-# ----------------------------------
-def get_patient_text():
-    return "\n".join(
-        msg["content"]
-        for msg in st.session_state.llm_history
-        if msg["role"] == "user"
-    )
-
-def generate_case_summary(text):
-    prompt = f"""
-Generate a DOCTOR-READY oncology clinical summary.
-
-Patient Summary:
-- Age:
-- Gender:
-- Symptoms:
-- Duration:
-- Red Flags:
-- Suggested Tests:
-- Guideline Reference (NCCN / WHO / ASCO-ESMO):
-- Clinical Note:
-
-Conversation:
-{text}
-"""
-
-    response = llm_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=350
-    )
-
-    return translate_text(
-        response.choices[0].message.content,
-        st.session_state.lang
-    )
-
-# ----------------------------------
-# PDF EXPORT
-# ----------------------------------
-def export_pdf(summary, doctor, reg_id):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=11)  # Changed to Helvetica (more reliable)
-
-    # Better handling of long lines
-    for line in summary.split("\n"):
-        if len(line) > 100:
-            # Simple word wrap for very long lines
-            words = line.split()
-            current = ""
-            for word in words:
-                if len(current) + len(word) + 1 > 90:
-                    pdf.multi_cell(0, 8, current)
-                    current = word
-                else:
-                    current = (current + " " + word) if current else word
-            if current:
-                pdf.multi_cell(0, 8, current)
-        else:
-            pdf.multi_cell(0, 8, line)
-
-    pdf.ln(5)
-    pdf.cell(0, 8, f"Doctor: {doctor}", ln=True)
-    pdf.cell(0, 8, f"Registration ID: {reg_id}", ln=True)
-    pdf.cell(0, 8, f"Signed: {datetime.now().strftime('%d %b %Y')}", ln=True)
-
-    path = f"/tmp/summary_{uuid.uuid4().hex}.pdf"
-    pdf.output(path)
-    return path
-
-# ----------------------------------
-# UI
-# ----------------------------------
-st.title("💬 Oncology Assistant")
-st.caption(f"Mode: {st.session_state.user_type.upper()}")
-
-st.session_state.lang = LANGUAGES[
-    st.selectbox("🌐 Output Language", LANGUAGES.keys())
-]
-
-left, right = st.columns([1, 2])
-
-# LEFT PANEL
+# ── LEFT: Upload Medical Report ──
 with left:
-    st.subheader("📄 Upload Medical Report")
-
-    file = st.file_uploader("Upload PDF / Image", type=["pdf", "png", "jpg"])
+    st.subheader("📋 Upload Medical Report")
+    file = st.file_uploader("PDF or Image", type=["pdf", "png", "jpg", "jpeg"])
 
     if file:
-        path = os.path.join(tempfile.gettempdir(), file.name)
-        with open(path, "wb") as f:
-            f.write(file.read())
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.name)[1]) as tmp:
+            tmp.write(file.read())
+            path = tmp.name
 
-        extracted_text = extract_text_from_file(path)
-        st.text_area("Extracted Text", extracted_text, height=200)
+        try:
+            text = extract_text_from_file(path)
+            st.text_area("Extracted text", text, height=160)
 
-        if st.button("Analyze Report"):
-            ask_bot(f"Analyze this safely:\n{extracted_text}")
+            if st.button("Explain this report"):
+                st.session_state.ui_history.append(("You", "[Report analysis request]"))
+                ask_bot(f"Please explain this report in simple terms:\n\n{text}")
+        finally:
+            try:
+                os.unlink(path)
+            except:
+                pass
 
-# RIGHT PANEL
+# ── RIGHT: Chat ──
 with right:
-    st.subheader("💬 Chat")
+    st.subheader("💬 Conversation")
 
-    msg = st.text_input("Ask a question")
+    # Scrollable messages container
+    chat_container = st.container(height=520)
 
-    st.markdown("🎤 **Or speak your question**")
+    with chat_container:
+        for role, msg in st.session_state.ui_history:
+            if role == "You":
+                st.markdown(f"**You:** {msg}")
+            else:
+                st.markdown(f"**Assistant:** {msg}")
+
+    # Auto-scroll attempt (works in many cases)
+    st.markdown(
+        """
+        <script>
+        var elem = window.parent.document.querySelector('.stApp > div');
+        if (elem) elem.scrollTop = elem.scrollHeight;
+        </script>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Input area — always at bottom
+    col_text, col_send = st.columns([6, 1])
+    with col_text:
+        user_input = st.text_input(
+            "",
+            placeholder="Ask anything about your situation...",
+            label_visibility="collapsed",
+            key="chat_input"
+        )
+
+    with col_send:
+        if st.button("Send", use_container_width=True) and user_input.strip():
+            st.session_state.ui_history.append(("You", user_input))
+            ask_bot(user_input)
+            st.rerun()
+
+    # Voice input (optional)
+    st.markdown("**Voice input**")
     audio = mic_recorder(
-        start_prompt="🎙 Start Recording",
-        stop_prompt="⏹ Stop Recording",
+        format="webm",
+        start_prompt="🎤 Record",
+        stop_prompt="⏹",
         just_once=True
     )
 
-    if audio:
-        with st.spinner("Transcribing with Groq Whisper..."):
-            spoken_text = transcribe_audio_bytes(audio["bytes"])
-            st.success(f"🗣 You said: {spoken_text}")
-            st.session_state.ui_history.append(("You (Voice)", spoken_text))
-            ask_bot(spoken_text)
+    if audio and audio.get("bytes"):
+        with st.spinner("Transcribing..."):
+            try:
+                audio_file = io.BytesIO(audio["bytes"])
+                audio_file.name = "voice.webm"
 
-    if st.button("Send") and msg.strip():
-        st.session_state.ui_history.append(("You", msg))
-        ask_bot(msg)
+                transcription = whisper_client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=audio_file,
+                    language=st.session_state.lang,
+                    response_format="text"
+                ).strip()
 
-    for sender, m in st.session_state.ui_history:
-        st.markdown(f"**{sender}:** {m}")
+                st.session_state.ui_history.append(("You (voice)", transcription))
+                ask_bot(transcription)
+                st.rerun()
 
-    if st.session_state.user_type == "doctor":
-        st.divider()
-        st.subheader("🩺 Clinical Summary")
-
-        if "summary" not in st.session_state:
-            st.session_state.summary = ""
-
-        if st.button("Generate Summary"):
-            st.session_state.summary = generate_case_summary(
-                get_patient_text()
-            )
-
-        st.text_area("Editable Summary", st.session_state.summary, height=300)
-
-        doctor = st.text_input("Doctor Name")
-        reg_id = st.text_input("Registration ID")
-
-        if st.button("Export PDF"):
-            if not doctor.strip():
-                st.warning("Please enter Doctor Name before exporting")
-            else:
-                pdf_path = export_pdf(
-                    st.session_state.summary,
-                    doctor,
-                    reg_id
-                )
-                with open(pdf_path, "rb") as f:
-                    st.download_button(
-                        "Download PDF",
-                        f,
-                        file_name="clinical_summary.pdf"
-                    )
+            except Exception as e:
+                st.error(f"Voice → text failed: {str(e)}")
